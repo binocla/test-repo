@@ -7,6 +7,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.eclipse.microprofile.rest.client.inject.RestClient;
 import org.jsoup.Jsoup;
 import org.neo4j.driver.Driver;
+import org.neo4j.driver.Record;
 import org.neo4j.driver.Value;
 import org.neo4j.driver.Values;
 import ru.kamila.clients.KpfuClient;
@@ -15,8 +16,10 @@ import ru.kamila.models.KnowledgeRequest;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 @Slf4j
@@ -30,8 +33,8 @@ public class KnowledgeService {
     Driver driver;
 
     public KnowledgeEntity createKnowledge(KnowledgeRequest knowledgeRequest) throws IOException {
+        log.info("Starting to create knowledge from URL: {}", knowledgeRequest.url());
         var idFromUrl = StringUtils.substringAfterLast(knowledgeRequest.url(), "/");
-        log.info("Creating knowledge for URL id: {}", idFromUrl);
 
         var doc = Jsoup.connect(knowledgeRequest.url() + FULL_QUERY).get();
 
@@ -41,6 +44,7 @@ public class KnowledgeService {
         var summary = "";
         var title = "";
         var type = "";
+        String fileDownloadUrl = null;
 
         for (var meta : doc.select("meta")) {
             var name = meta.attr("name");
@@ -55,7 +59,6 @@ public class KnowledgeService {
             }
         }
 
-        String fileDownloadUrl = null;
         for (var a : doc.select("a[href]")) {
             if (a.attr("href").contains("file")) {
                 fileDownloadUrl = "https://dspace.kpfu.ru" + a.attr("href")
@@ -64,20 +67,30 @@ public class KnowledgeService {
                 break;
             }
         }
-        var fileBytes = kpfuClient.downloadFile(fileDownloadUrl);
+
+        byte[] fileBytes = null;
+        if (fileDownloadUrl != null) {
+            log.info("Downloading file from: {}", fileDownloadUrl);
+            fileBytes = kpfuClient.downloadFile(fileDownloadUrl);
+        } else {
+            log.warn("Could not find a downloadable file link on page: {}", knowledgeRequest.url());
+        }
 
         var knowledgeId = UUID.randomUUID();
         var knowledge = new KnowledgeEntity(knowledgeId, authors, creationDate, issuerId, summary, title, type, fileBytes);
 
+        var authorNamesString = String.join(" ", authors);
+
         try (var session = driver.session()) {
             var cypher = """
                     MERGE (k:Knowledge {id: $id})
-                    SET k.creationDate = $creationDate, 
-                        k.issuerId = $issuerId, 
+                    SET k.creationDate = $creationDate,
+                        k.issuerId = $issuerId,
                         k.summary = $summary,
-                        k.title = $title, 
-                        k.type = $type, 
-                        k.file = $file
+                        k.title = $title,
+                        k.type = $type,
+                        k.file = $file,
+                        k.authorNames = $authorNames
                     WITH k
                     UNWIND $authors as authorName
                     MERGE (a:Author {name: authorName})
@@ -94,12 +107,14 @@ public class KnowledgeService {
                         "title", knowledge.getTitle(),
                         "type", knowledge.getType(),
                         "file", knowledge.getFile(),
+                        "authorNames", authorNamesString,
                         "authors", knowledge.getAuthors()
                 ));
                 return null;
             });
         }
-
+        log.info("Successfully created knowledge node with ID: {}", knowledge.getId());
+        knowledge.setFile(null);
         return knowledge;
     }
 
@@ -112,39 +127,48 @@ public class KnowledgeService {
                     """;
             var record = session.executeRead(tx -> {
                 var result = tx.run(cypher, Values.parameters("id", id));
-                return result.single();
+                return result.hasNext() ? result.single() : null;
             });
-            var kNode = record.get("k").asNode();
-            var authors = record.get("authors").asList(Value::asString);
-            return KnowledgeEntity.from(kNode, authors);
+            return record != null ? recordToKnowledgeEntity(record) : null;
+        }
+    }
+
+    public byte[] getKnowledgeFile(String id) {
+        try (var session = driver.session()) {
+            var cypher = "MATCH (k:Knowledge {id: $id}) RETURN k.file as file";
+            return session.executeRead(tx -> {
+                var result = tx.run(cypher, Values.parameters("id", id));
+                if (result.hasNext()) {
+                    Value fileValue = result.single().get("file");
+                    return fileValue.isNull() ? null : fileValue.asByteArray();
+                }
+                return null;
+            });
         }
     }
 
     public List<KnowledgeEntity> searchKnowledges(String searchText, int page, int size) {
-        int skip = page * size;
+        var skip = page * size;
+
+        var enhancedQuery = Arrays.stream(searchText.trim().split("\\s+"))
+                .filter(term -> !term.isEmpty())
+                .map(term -> "(" + term + "* OR " + term + "~1)")
+                .collect(Collectors.joining(" AND "));
+
+        log.info("Executing enhanced search with query: {}", enhancedQuery);
+
         try (var session = driver.session()) {
             var cypher = """
-                    MATCH (k:Knowledge)
-                    OPTIONAL MATCH (k)-[:WRITTEN_BY]->(a:Author)
-                    WHERE toLower(k.summary) CONTAINS toLower($searchText)
-                       OR toLower(k.title) CONTAINS toLower($searchText)
-                       OR toLower(a.name) CONTAINS toLower($searchText)
-                    WITH k, collect(a.name) as authors
-                    RETURN k, authors SKIP $skip LIMIT $limit
+                    CALL db.index.fulltext.queryNodes("knowledge_search_index", $searchText) YIELD node, score
+                    MATCH (node)-[:WRITTEN_BY]->(a:Author)
+                    WITH node AS k, score, collect(a.name) as authors
+                    RETURN k, authors, score
+                    ORDER BY score DESC
+                    SKIP $skip LIMIT $limit
                     """;
             var result = session.executeRead(tx ->
-                    tx.run(cypher, Values.parameters(
-                            "searchText", searchText,
-                            "skip", skip,
-                            "limit", size
-                    )).list());
-            var knowledges = new ArrayList<KnowledgeEntity>();
-            for (var record : result) {
-                var kNode = record.get("k").asNode();
-                var authorsList = record.get("authors").asList(Value::asString);
-                knowledges.add(KnowledgeEntity.from(kNode, authorsList));
-            }
-            return knowledges;
+                    tx.run(cypher, Values.parameters("searchText", enhancedQuery, "skip", skip, "limit", size)).list());
+            return recordsToKnowledgeEntityList(result);
         }
     }
 
@@ -155,20 +179,13 @@ public class KnowledgeService {
                     MATCH (k:Knowledge)
                     OPTIONAL MATCH (k)-[:WRITTEN_BY]->(a:Author)
                     WITH k, collect(a.name) as authors
-                    RETURN k, authors SKIP $skip LIMIT $limit
+                    RETURN k, authors
+                    ORDER BY k.creationDate DESC
+                    SKIP $skip LIMIT $limit
                     """;
             var result = session.executeRead(tx ->
-                    tx.run(cypher, Values.parameters(
-                            "skip", skip,
-                            "limit", size
-                    )).list());
-            var knowledges = new ArrayList<KnowledgeEntity>();
-            for (var record : result) {
-                var kNode = record.get("k").asNode();
-                var authorsList = record.get("authors").asList(Value::asString);
-                knowledges.add(KnowledgeEntity.from(kNode, authorsList));
-            }
-            return knowledges;
+                    tx.run(cypher, Values.parameters("skip", skip, "limit", size)).list());
+            return recordsToKnowledgeEntityList(result);
         }
     }
 
@@ -179,21 +196,43 @@ public class KnowledgeService {
                     MATCH (a:Author {id: $authorId})<-[:WRITTEN_BY]-(k:Knowledge)
                     OPTIONAL MATCH (k)-[:WRITTEN_BY]->(other:Author)
                     WITH k, collect(other.name) as authors
-                    RETURN k, authors SKIP $skip LIMIT $limit
+                    RETURN k, authors
+                    ORDER BY k.creationDate DESC
+                    SKIP $skip LIMIT $limit
                     """;
             var result = session.executeRead(tx ->
-                    tx.run(cypher, Values.parameters(
-                            "authorId", authorId,
-                            "skip", skip,
-                            "limit", size
-                    )).list());
-            var knowledges = new ArrayList<KnowledgeEntity>();
-            for (var record : result) {
-                var kNode = record.get("k").asNode();
-                var authorsList = record.get("authors").asList(Value::asString);
-                knowledges.add(KnowledgeEntity.from(kNode, authorsList));
-            }
-            return knowledges;
+                    tx.run(cypher, Values.parameters("authorId", authorId, "skip", skip, "limit", size)).list());
+            return recordsToKnowledgeEntityList(result);
         }
+    }
+
+    public List<KnowledgeEntity> getAuthorBasedRecommendations(String knowledgeId, int limit) {
+        try (var session = driver.session()) {
+            var cypher = """
+                    MATCH (source:Knowledge {id: $knowledgeId})-[:WRITTEN_BY]->(a:Author)
+                    MATCH (rec:Knowledge)-[:WRITTEN_BY]->(a)
+                    WHERE source <> rec
+                    WITH rec, count(a) AS sharedAuthors
+                    OPTIONAL MATCH (rec)-[:WRITTEN_BY]->(allAuthors:Author)
+                    WITH rec, sharedAuthors, collect(allAuthors.name) AS authors
+                    RETURN rec AS k, authors, sharedAuthors
+                    ORDER BY sharedAuthors DESC
+                    LIMIT $limit
+                    """;
+            var result = session.executeRead(tx -> tx.run(cypher, Values.parameters("knowledgeId", knowledgeId, "limit", limit)).list());
+            return recordsToKnowledgeEntityList(result);
+        }
+    }
+
+    private List<KnowledgeEntity> recordsToKnowledgeEntityList(List<Record> records) {
+        return records.stream()
+                .map(this::recordToKnowledgeEntity)
+                .collect(Collectors.toList());
+    }
+
+    private KnowledgeEntity recordToKnowledgeEntity(Record record) {
+        var kNode = record.get("k").asNode();
+        var authors = record.get("authors").asList(Value::asString);
+        return KnowledgeEntity.from(kNode, authors);
     }
 }

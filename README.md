@@ -1,88 +1,126 @@
-# kamila-knowledge-system
+# Система Управления Знаниями - Дипломный Проект
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+-----
 
-If you want to learn more about Quarkus, please visit its website: <https://quarkus.io/>.
+## Обзор проекта
 
-## Running the application in dev mode
+Данный проект представляет собой веб-приложение для управления базой знаний научных статей. Система автоматически
+извлекает (парсит) метаданные, такие как название, авторы, аннотация и дата публикации, со страниц статей
+университетского репозитория.
 
-You can run your application in dev mode that enables live coding using:
+Все данные сохраняются в графовой базе данных **Neo4j**, что позволяет эффективно находить связи между документами и
+авторами. Пользовательский интерфейс, созданный на **React**, предоставляет удобные инструменты для интеллектуального
+поиска, просмотра информации и получения рекомендаций.
 
-```shell script
-./mvnw quarkus:dev
+-----
+
+## Ключевые технологии
+
+* **Бэкенд**: Quarkus (Java)
+* **База данных**: Neo4j
+* **Фронтенд**: React с Vite и TypeScript (интегрирован через Quarkus Quinoa)
+* **Стилизация**: Tailwind CSS
+* **Оркестрация**: Docker и Docker Compose
+
+-----
+
+## Основные возможности
+
+* **Добавление документов по URL**: Система парсит страницу статьи и автоматически заполняет базу данных.
+* **Интеллектуальный поиск**: Полнотекстовый поиск по названию, аннотации и авторам с поддержкой частичных совпадений и
+  исправлением опечаток.
+* **Рекомендации на основе авторов**: При просмотре документа система предлагает другие работы тех же авторов.
+* **Скачивание исходных файлов**: Возможность скачать оригинальный PDF-файл документа.
+* **Автоматическое создание индексов**: Индексы в базе данных Neo4j создаются автоматически при старте приложения для
+  обеспечения высокой производительности поиска.
+
+-----
+
+## Запуск проекта с помощью Docker Compose
+
+Для развертывания всего стека приложения (бэкенд и база данных) используется Docker Compose.
+
+### Предварительные требования
+
+* Установленный **Docker**
+* Установленный **Docker Compose**
+
+### Инструкция по запуску
+
+1. **Сборка приложения**:
+   Перед первым запуском необходимо собрать ваше Quarkus-приложение с помощью Maven. Выполните в корневой директории
+   проекта:
+
+   ```bash
+   ./mvnw package
+   ```
+
+2. **Запуск сервисов**:
+   Используя файл `docker-compose.yaml`, запустите оба контейнера:
+
+   ```bash
+   docker-compose up --build
+   ```
+
+   Ключ `--build` необходим для того, чтобы Docker собрал образ вашего бэкенд-приложения.
+
+После успешного выполнения этих команд:
+
+* Ваше бэкенд-приложение будет доступно по адресу `http://localhost:8080`.
+* Веб-интерфейс Neo4j будет доступен по адресу `http://localhost:7474`.
+
+-----
+
+## Документация по API
+
+Ниже представлено описание эндпоинтов, предоставляемых сервисом.
+
+### Управление документами
+
+| Мет од | Пу   ть                      | Описание                                      |
+| :--:--------------------------------- | :-------------------------------------------- |
+| `PO ST`  | `/ api/v1/knowledge`       | Создает новый документ, парся данные по URL. |
+| `GE T`   | `/ api/v1/knowledge`       | Получает список документов с поиском и пагинацией. |
+| `GE T`   | `/ api/v1/knowledge/{id}`  | Получает детальную информацию о документе по ID. |
+| `GE T`   | `/ api/v1/knowledge/{id}/download` | Скачивает исходный файл документа по ID.     |
+
+### Рекомендации и связи
+
+| Метод | Путь                               | Описание                                  |
+| :---- | :--------------------------------- | :---------------------------------------- |
+| `GET`   | `/api/v1/knowledge/{id}/recommendations` | Получает список рекомендованных документов. |
+| `GET`   | `/api/v1/knowledge/author/{authorId}`    | Получает все документы указанного автора. |
+
+-----
+
+### Детали эндпоинтов
+
+#### `POST /api/v1/knowledge`
+
+Создает новый документ. В теле запроса необходимо передать JSON с URL статьи.
+
+**Тело запроса**:
+
+```json
+{
+  "url": "https://dspace.kpfu.ru/xmlui/handle/net/..."
+}
 ```
 
-> **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at <http://localhost:8080/q/dev/>.
+#### `GET /api/v1/knowledge`
 
-## Packaging and running the application
+Возвращает список документов.
 
-The application can be packaged using:
+**Параметры запроса**:
 
-```shell script
-./mvnw package
-```
+* `search` (string, опционально): Текст для полнотекстового поиска.
+* `page` (integer, по умолчанию `0`): Номер страницы для пагинации.
+* `size` (integer, по умолчанию `10`): Количество элементов на странице.
 
-It produces the `quarkus-run.jar` file in the `target/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
+#### `GET /api/v1/knowledge/{id}/recommendations`
 
-The application is now runnable using `java -jar target/quarkus-app/quarkus-run.jar`.
+Возвращает список рекомендованных документов на основе общих авторов.
 
-If you want to build an _über-jar_, execute the following command:
+**Параметры запроса**:
 
-```shell script
-./mvnw package -Dquarkus.package.jar.type=uber-jar
-```
-
-The application, packaged as an _über-jar_, is now runnable using `java -jar target/*-runner.jar`.
-
-## Creating a native executable
-
-You can create a native executable using:
-
-```shell script
-./mvnw package -Dnative
-```
-
-Or, if you don't have GraalVM installed, you can run the native executable build in a container using:
-
-```shell script
-./mvnw package -Dnative -Dquarkus.native.container-build=true
-```
-
-You can then execute your native executable with: `./target/kamila-knowledge-system-1.0-SNAPSHOT-runner`
-
-If you want to learn more about building native executables, please consult <https://quarkus.io/guides/maven-tooling>.
-
-## Related Guides
-
-- REST ([guide](https://quarkus.io/guides/rest)): A Jakarta REST implementation utilizing build time processing and
-  Vert.x. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on
-  it.
-- Hibernate Validator ([guide](https://quarkus.io/guides/validation)): Validate object properties (field, getter) and
-  method parameters for your beans (REST, CDI, Jakarta Persistence)
-- REST Client ([guide](https://quarkus.io/guides/rest-client)): Call REST services
-- SmallRye OpenAPI ([guide](https://quarkus.io/guides/openapi-swaggerui)): Document your REST APIs with OpenAPI - comes
-  with Swagger UI
-- REST Jackson ([guide](https://quarkus.io/guides/rest#json-serialisation)): Jackson serialization support for Quarkus
-  REST. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on it
-- SmallRye Health ([guide](https://quarkus.io/guides/smallrye-health)): Monitor service health
-
-## Provided Code
-
-### REST Client
-
-Invoke different services through REST with JSON
-
-[Related guide section...](https://quarkus.io/guides/rest-client)
-
-### REST
-
-Easily start your REST Web Services
-
-[Related guide section...](https://quarkus.io/guides/getting-started-reactive#reactive-jax-rs-resources)
-
-### SmallRye Health
-
-Monitor your application's health using SmallRye Health
-
-[Related guide section...](https://quarkus.io/guides/smallrye-health)
+* `limit` (integer, по умолчанию `5`): Максимальное количество рекомендаций.
